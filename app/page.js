@@ -4,15 +4,17 @@ import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabaseClient';
 
 function sanitizeKey(name) {
-  return (
-    name
-      .trim()
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/\s+/g, '_')
-      .replace(/[^a-z0-9_-]/g, '') || 'sin_nombre'
-  );
+  const cleaned = name
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_-]/g, '');
+  if (cleaned) return cleaned;
+  let hash = 0;
+  for (const char of name.trim()) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+  return 'persona_' + hash.toString(36);
 }
 
 /* ---------- iconos simples en SVG (sin dependencias externas) ---------- */
@@ -108,7 +110,11 @@ export default function TeamPlanner() {
         setEntering(false);
         return;
       }
-      setMembers((prev) => (prev.find((m) => m.key === key) ? prev : [...prev, { key, name: trimmed }]));
+      if (insertErr && insertErr.code === '23505') {
+        const { data: existingRow } = await supabase.from('members').select('key, name').eq('key', key).single();
+        if (existingRow) displayName = existingRow.name;
+      }
+      setMembers((prev) => (prev.find((m) => m.key === key) ? prev : [...prev, { key, name: displayName }]));
     } else {
       displayName = existing.name;
     }
@@ -125,7 +131,6 @@ export default function TeamPlanner() {
   const addTask = async () => {
     const text = newTask.trim();
     if (!text || !currentUser) return;
-    setNewTask('');
     const { data, error: err } = await supabase
       .from('todos')
       .insert({ member_key: currentUser.key, text })
@@ -135,6 +140,8 @@ export default function TeamPlanner() {
       setError('No se pudo guardar el pendiente. Intenta de nuevo.');
       return;
     }
+    setError('');
+    setNewTask('');
     setTodos((prev) => [...prev, data]);
   };
 
@@ -144,13 +151,29 @@ export default function TeamPlanner() {
     const nextDone = !target.done;
     setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: nextDone } : t)));
     const { error: err } = await supabase.from('todos').update({ done: nextDone }).eq('id', id);
-    if (err) setError('No se pudo guardar el cambio. Intenta de nuevo.');
+    if (err) {
+      setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: target.done } : t)));
+      setError('No se pudo guardar el cambio. Intenta de nuevo.');
+    } else {
+      setError('');
+    }
   };
 
   const deleteTask = async (id) => {
+    const target = todos.find((t) => t.id === id);
+    const targetIndex = todos.findIndex((t) => t.id === id);
     setTodos((prev) => prev.filter((t) => t.id !== id));
     const { error: err } = await supabase.from('todos').delete().eq('id', id);
-    if (err) setError('No se pudo eliminar el pendiente. Intenta de nuevo.');
+    if (err && target) {
+      setTodos((prev) => {
+        const next = [...prev];
+        next.splice(targetIndex, 0, target);
+        return next;
+      });
+      setError('No se pudo eliminar el pendiente. Intenta de nuevo.');
+    } else {
+      setError('');
+    }
   };
 
   const loadBoard = useCallback(async () => {
